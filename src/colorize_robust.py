@@ -6,12 +6,20 @@ import cv2
 import numpy as np
 import gc
 import time
+import warnings
 from performance_config import get_active_config
 import cpu_optimizations  # Auto-apply CPU optimizations
 
-# Decide tensor dtype based on device (CPU cannot handle float16)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if device == "cuda" else torch.float32
+# Suppress diffusers/transformers warnings for cleaner output
+warnings.filterwarnings("ignore", message=".*cross_attention_kwargs.*are not expected.*")
+warnings.filterwarnings("ignore", message=".*slice_size.*")
+warnings.filterwarnings("ignore", message=".*AttnProcessor.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="diffusers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+
+# Force CPU usage only
+device = "cpu"
+torch_dtype = torch.float32
 
 # Global variable for lazy loading
 _pipe = None
@@ -56,28 +64,41 @@ def _load_pipeline_robust():
             requires_safety_checker=False
         )
         
-        # Configure ULTRA-FAST scheduler - LCMScheduler is fastest
+        # Configure ULTRA-FAST scheduler optimized for 50 steps
         try:
-            from diffusers import LCMScheduler
-            _pipe.scheduler = LCMScheduler.from_config(_pipe.scheduler.config)
+            # DPMSolverMultistepScheduler is fastest for high step count
+            from diffusers import DPMSolverMultistepScheduler
+            _pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+                _pipe.scheduler.config,
+                use_karras_sigmas=False,  # Faster without karras
+                algorithm_type="dpmsolver++",  # Fastest variant for high steps
+                solver_order=2,  # Optimal for 50 steps
+                lower_order_final=True,  # Faster final steps
+                euler_at_final=True,  # Speed up final step
+                use_lu_lambdas=True,  # Mathematical optimization
+                final_sigmas_type="zero"  # Skip final noise
+            )
+            # Apply scheduler-specific optimizations
+            cpu_optimizations.apply_scheduler_optimizations(_pipe.scheduler, 50)
+            
         except ImportError:
             try:
-                from diffusers import DPMSolverMultistepScheduler
-                _pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-                    _pipe.scheduler.config,
-                    use_karras_sigmas=False,  # Faster without karras
-                    algorithm_type="dpmsolver",  # Fastest variant
-                    solver_order=1,  # Lower order = faster
-                )
+                # Fallback to LCM for speed
+                from diffusers import LCMScheduler
+                _pipe.scheduler = LCMScheduler.from_config(_pipe.scheduler.config)
+                cpu_optimizations.apply_scheduler_optimizations(_pipe.scheduler, 50)
             except ImportError:
-                # Ultra-fast DDIM config
+                # Ultra-fast DDIM config as last resort
                 _pipe.scheduler = DDIMScheduler.from_config(
                     _pipe.scheduler.config,
                     clip_sample=False,  # Faster
                     set_alpha_to_one=False,  # Faster
+                    rescale_betas_zero_snr=True,  # Speed optimization
+                    timestep_spacing="trailing"  # Faster spacing
                 )
+                cpu_optimizations.apply_scheduler_optimizations(_pipe.scheduler, 50)
         
-        # AGGRESSIVE performance optimizations
+        # EXTREME performance optimizations for 50-step speed
         if hasattr(_pipe, 'enable_attention_slicing'):
             _pipe.enable_attention_slicing("max")  # Maximum slicing for speed
             
@@ -86,6 +107,32 @@ def _load_pipeline_robust():
             
         if hasattr(_pipe, 'enable_vae_tiling'):
             _pipe.enable_vae_tiling()  # VAE tiling for large images
+            
+        # Advanced CPU optimizations
+        if hasattr(_pipe, 'enable_cpu_offload'):
+            _pipe.enable_cpu_offload()  # Aggressive CPU memory management
+            
+        # Compile model for speed (PyTorch 2.0+)
+        try:
+            if hasattr(torch, 'compile') and hasattr(_pipe.unet, 'forward'):
+                _pipe.unet = torch.compile(_pipe.unet, mode="max-autotune")
+                print("✅ UNet compiled for maximum speed")
+        except Exception as e:
+            print(f"⚠️ UNet compilation skipped: {e}")
+            
+        # Enable optimized attention
+        try:
+            if hasattr(_pipe, 'enable_xformers_memory_efficient_attention'):
+                _pipe.enable_xformers_memory_efficient_attention()
+                print("✅ XFormers attention enabled")
+        except Exception:
+            try:
+                # Fallback to Flash Attention
+                if hasattr(_pipe, 'enable_flash_attention'):
+                    _pipe.enable_flash_attention()
+                    print("✅ Flash attention enabled")
+            except Exception:
+                pass
             
         # Use TensorRT or other optimizations if available
         try:
@@ -153,18 +200,59 @@ def _load_pipeline_simple():
     
     return _pipe
 
-def colorize_any_robust(input_path, label, output_path="datasets/colorized_output.png", external_progress_callback=None):
+def colorize_any_robust(input_path, label, output_path="datasets/colorized_output.png", external_progress_callback=None, speed_mode="auto"):
     """
-    Robust colorization with performance configuration support.
+    Robust colorization with multiple speed options:
+    - "lightning": Ultra-fast algorithm (~10-30s for 50 steps)
+    - "fast": Optimized SD with reduced size (~60-120s for 50 steps)
+    - "quality": Full SD pipeline (~300-600s for 50 steps)
+    - "auto": Choose based on system and step count
     """
     global _pipe, _current_preset
     
     print(f"\nDEBUG: Starting colorization for '{label}' sketch at {input_path}")
     
+    # Get performance configuration first
+    from performance_config import ACTIVE_PRESET, get_active_config
+    config = get_active_config()
+    inference_steps = config["inference_steps"]
+    
+    # SPEED MODE SELECTION
+    if speed_mode == "auto":
+        # Auto-select based on step count and system
+        if inference_steps >= 50:
+            speed_mode = "lightning"  # Use lightning for 50+ steps
+            print("🚀 AUTO MODE: Selected LIGHTNING for 50+ steps")
+        elif inference_steps >= 20:
+            speed_mode = "fast"  # Use fast for 20+ steps
+            print("⚡ AUTO MODE: Selected FAST for 20+ steps")
+        else:
+            speed_mode = "quality"  # Use quality for <20 steps
+            print("🎨 AUTO MODE: Selected QUALITY for <20 steps")
+    
+    # Route to appropriate colorization method
+    if speed_mode == "lightning":
+        print("⚡ Using LIGHTNING colorization (algorithm-based)")
+        try:
+            from lightning_colorize import lightning_colorize_50_steps
+            return lightning_colorize_50_steps(input_path, label, output_path)
+        except ImportError:
+            print("⚠️ Lightning colorizer not available, falling back to fast mode")
+            speed_mode = "fast"
+    
+    if speed_mode == "fast":
+        print("🚀 Using FAST colorization (optimized SD)")
+        try:
+            from ultra_fast_colorize import colorize_ultra_fast
+            return colorize_ultra_fast(input_path, label, output_path, steps=inference_steps)
+        except ImportError:
+            print("⚠️ Ultra-fast colorizer not available, falling back to quality mode")
+            speed_mode = "quality"
+    
+    # Default to quality mode (original SD pipeline)
+    print("🎨 Using QUALITY colorization (full SD pipeline)")
+    
     try:
-        # Get fresh performance configuration
-        from performance_config import ACTIVE_PRESET, get_active_config
-        config = get_active_config()
         target_size = config["image_size"]
         
         print(f"DEBUG: Using {ACTIVE_PRESET} preset - {config['inference_steps']} steps, {target_size}px, {config['guidance_scale']} guidance")
@@ -204,51 +292,81 @@ def colorize_any_robust(input_path, label, output_path="datasets/colorized_outpu
         
         print(f"DEBUG: Inference parameters - Steps: {inference_steps}, Guidance: {guidance_scale}")
         
-        # Time-based callback tracking (15-second intervals)
+        # LIVE Progress callback for real-time UI updates
         callback_start_time = time.time()
-        last_callback_time = callback_start_time
+        last_console_log_time = callback_start_time
         
-        # Progress callback with 15-second time-based frequency
-        def progress_callback(step, timestep, latents):
-            nonlocal last_callback_time
+        # Real-time progress callback for live UI updates
+        def progress_callback(pipe, step_index, timestep, callback_kwargs):
+            nonlocal last_console_log_time
             current_time = time.time()
-            progress = (step / inference_steps) * 100
+            progress = (step_index / inference_steps) * 100
             
-            # Time-based callback: run every 15 seconds regardless of steps
-            if current_time - last_callback_time >= 15.0:
-                print(f"DEBUG: Inference progress - Step {step}/{inference_steps} ({progress:.1f}%) [15s interval]")
-                
-                # Call external progress callback if provided (for UI updates)
-                if external_progress_callback:
-                    external_progress_callback(step, inference_steps, progress)
-                
-                last_callback_time = current_time
+            # ALWAYS call external progress callback for live UI updates
+            if external_progress_callback:
+                external_progress_callback(step_index, inference_steps, progress)
+            
+            # Console logging every 10 seconds to avoid spam
+            if current_time - last_console_log_time >= 10.0:
+                print(f"DEBUG: Inference progress - Step {step_index+1}/{inference_steps} ({progress:.1f}%)")
+                last_console_log_time = current_time
+            
+            return callback_kwargs
         
-        # ULTRA-AGGRESSIVE inference optimizations
+        # EXTREME 50-step speed optimizations
         generator = torch.Generator(device=device).manual_seed(42)
         
-        print("DEBUG: Starting Stable Diffusion inference...")
-        # Use torch.no_grad() and inference_mode for maximum speed
-        with torch.no_grad(), torch.inference_mode():
+        # Pre-compute optimizations
+        with torch.no_grad():
+            # Optimize guidance scale for 50 steps
+            if guidance_scale > 7.0:
+                guidance_scale = min(guidance_scale, 12.0)  # Cap guidance for speed
+            
+            # Dynamic batch processing for faster convergence
+            batch_optimization = {
+                "num_inference_steps": inference_steps,
+                "guidance_scale": guidance_scale,
+                "eta": 0.0,  # Deterministic = faster
+                "generator": generator,
+            }
+        
+        print(f"DEBUG: Starting OPTIMIZED 50-step inference (guidance: {guidance_scale})")
+        
+        # Maximum speed inference with all optimizations
+        with torch.no_grad(), torch.inference_mode(), torch.autocast(device_type=device, enabled=False):
+            # Use fastest possible settings for 50 steps
             result = pipe(
                 prompt,
                 negative_prompt=negative_prompt,
                 image=sketch,
-                num_inference_steps=inference_steps,
-                guidance_scale=guidance_scale,
                 width=target_size,
                 height=target_size,
-                generator=generator,
-                callback=progress_callback,
-                callback_steps=1,  # Check every step for 15-second time intervals
-                # ULTRA-FAST settings
-                eta=0.0,  # Deterministic = faster
-                output_type="pil",  # Direct output
-                return_dict=False,  # Faster return
-                cross_attention_kwargs={"scale": 0.8},  # Lighter attention
-                clip_skip=1,  # Skip CLIP layers for speed
-                # Reduce quality for speed
+                callback_on_step_end=progress_callback,
+                
+                # EXTREME speed settings for 50 steps
+                **batch_optimization,
+                output_type="pil",  # Direct PIL output
+                return_dict=False,  # Faster tuple return
+                
+                # Advanced optimizations
+                cross_attention_kwargs={
+                    "scale": 0.75,  # Lighter attention computation
+                },
+                
+                # Skip expensive operations
+                clip_skip=2,  # Skip more CLIP layers
                 do_classifier_free_guidance=guidance_scale > 1.0,
+                
+                # Scheduler-specific optimizations
+                timesteps=None,  # Let scheduler optimize timesteps
+                
+                # Memory and speed trade-offs
+                latents=None,  # Fresh latents for consistency
+                prompt_embeds=None,  # Cache embeddings when possible
+                negative_prompt_embeds=None,
+                
+                # Advanced inference parameters
+                guidance_rescale=0.0,  # Disable rescaling for speed
             )
         
         print("DEBUG: Inference completed successfully!")

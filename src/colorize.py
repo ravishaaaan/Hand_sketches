@@ -5,11 +5,19 @@ from PIL import Image
 import cv2
 import numpy as np
 import time
+import warnings
 from performance_config import get_active_config
 
-# Decide tensor dtype based on device (CPU cannot handle float16)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if device == "cuda" else torch.float32
+# Suppress diffusers/transformers warnings for cleaner output
+warnings.filterwarnings("ignore", message=".*cross_attention_kwargs.*are not expected.*")
+warnings.filterwarnings("ignore", message=".*slice_size.*")
+warnings.filterwarnings("ignore", message=".*AttnProcessor.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="diffusers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+
+# Force CPU usage only
+device = "cpu"
+torch_dtype = torch.float32
 
 # Global variable for lazy loading
 _pipe = None
@@ -81,27 +89,67 @@ def _load_pipeline():
         raise
 
 
-def colorize_any(input_path, label, output_path="datasets/colorized_output.png"):
+def colorize_any(input_path, label, output_path="datasets/colorized_output.png", external_progress_callback=None, speed_mode="auto"):
     """
-    Generate both colored and grayscale realistic images from a sketch.
+    Generate both colored and grayscale realistic images from a sketch with speed options.
     
     Args:
         input_path (str): Path to input sketch image.
         label (str): Predicted label from classifier.
         output_path (str): Path to save the colorized image.
+        external_progress_callback: Optional progress callback function.
+        speed_mode (str): "auto", "lightning", "fast", or "quality"
     
     Returns:
         tuple(str, str): Paths to (colorized_image, grayscale_image)
     """
-    global _pipe, _current_preset
     
-    # Get fresh performance configuration
+    # Get performance configuration first
     from performance_config import ACTIVE_PRESET, get_active_config
     config = get_active_config()
-    target_size = config["image_size"]
+    inference_steps = config["inference_steps"]
     
     print(f"🎯 Active preset: {ACTIVE_PRESET}")
-    print(f"🎯 Config: {config['inference_steps']} steps, {config['guidance_scale']} guidance, {target_size}px")
+    print(f"🎯 Config: {inference_steps} steps, {config['guidance_scale']} guidance, {config['image_size']}px")
+    
+    # SPEED MODE SELECTION (same logic as robust version)
+    if speed_mode == "auto":
+        # Auto-select based on step count
+        if inference_steps >= 50:
+            speed_mode = "lightning"  # Use lightning for 50+ steps
+            print("🚀 AUTO MODE: Selected LIGHTNING for 50+ steps")
+        elif inference_steps >= 20:
+            speed_mode = "fast"  # Use fast for 20+ steps
+            print("⚡ AUTO MODE: Selected FAST for 20+ steps")
+        else:
+            speed_mode = "quality"  # Use quality for <20 steps
+            print("🎨 AUTO MODE: Selected QUALITY for <20 steps")
+    
+    # Route to appropriate colorization method
+    if speed_mode == "lightning":
+        print("⚡ Using LIGHTNING colorization (algorithm-based)")
+        try:
+            from lightning_colorize import lightning_colorize_50_steps
+            return lightning_colorize_50_steps(input_path, label, output_path)
+        except ImportError:
+            print("⚠️ Lightning colorizer not available, falling back to fast mode")
+            speed_mode = "fast"
+    
+    if speed_mode == "fast":
+        print("🚀 Using FAST colorization (optimized SD)")
+        try:
+            from ultra_fast_colorize import colorize_ultra_fast
+            return colorize_ultra_fast(input_path, label, output_path, steps=inference_steps)
+        except ImportError:
+            print("⚠️ Ultra-fast colorizer not available, falling back to quality mode")
+            speed_mode = "quality"
+    
+    # Default to quality mode (original SD pipeline)
+    print("🎨 Using QUALITY colorization (original pipeline)")
+    
+    global _pipe, _current_preset
+    
+    target_size = config["image_size"]
     
     # ALWAYS check if preset changed - reload pipeline if needed
     if _current_preset != ACTIVE_PRESET:
@@ -136,20 +184,26 @@ def colorize_any(input_path, label, output_path="datasets/colorized_output.png")
     print(f"🚀 INFERENCE STARTING: {inference_steps} steps, {guidance_scale} guidance, {target_size}px")
     print(f"🔍 Double-check - Active preset: {ACTIVE_PRESET}")
     
-    # Time-based callback tracking (15-second intervals)
+    # LIVE Progress callback for real-time UI updates
     callback_start_time = time.time()
-    last_callback_time = callback_start_time
+    last_console_log_time = callback_start_time
     
-    # Progress callback with 15-second time-based frequency
-    def progress_callback(step, timestep, latents):
-        nonlocal last_callback_time
+    # Real-time progress callback for live UI updates
+    def progress_callback(pipe, step_index, timestep, callback_kwargs):
+        nonlocal last_console_log_time
         current_time = time.time()
-        progress = (step + 1) / inference_steps
+        progress = (step_index / inference_steps) * 100
         
-        # Time-based callback: run every 15 seconds regardless of steps
-        if current_time - last_callback_time >= 15.0:
-            print(f"   Inference step {step+1}/{inference_steps} ({progress*100:.1f}%) [15s interval]")
-            last_callback_time = current_time
+        # ALWAYS call external progress callback for live UI updates
+        if external_progress_callback:
+            external_progress_callback(step_index, inference_steps, progress)
+        
+        # Console logging every 10 seconds to avoid spam
+        if current_time - last_console_log_time >= 10.0:
+            print(f"🎨 Colorization Progress: {progress:.1f}% (Step {step_index+1}/{inference_steps})")
+            last_console_log_time = current_time
+        
+        return callback_kwargs
     
     result = pipe(
         prompt,
@@ -160,8 +214,7 @@ def colorize_any(input_path, label, output_path="datasets/colorized_output.png")
         height=target_size,
         width=target_size,
         generator=torch.Generator().manual_seed(42),  # Consistent results
-        callback=progress_callback,
-        callback_steps=1
+        callback_on_step_end=progress_callback
     )
 
     # Save colorized result

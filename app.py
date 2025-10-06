@@ -1,5 +1,14 @@
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
+import warnings
+
+# Suppress all warnings for clean UI output
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*cross_attention_kwargs.*")
+warnings.filterwarnings("ignore", message=".*slice_size.*")
+warnings.filterwarnings("ignore", message=".*AttnProcessor.*")
+
 from src.grayscale import convert_to_grayscale
 try:
     from src.colorize_robust import colorize_any
@@ -49,29 +58,17 @@ with col3:
     if selected_preset in PRESETS:
         config = PRESETS[selected_preset]
         
-        # Hardware detection
-        import torch
-        if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            if gpu_memory >= 8:
-                recommended = "high"
-            elif gpu_memory >= 6:
-                recommended = "medium" 
-            else:
-                recommended = "fast"
-            hardware_info = f"🖥️ GPU: {gpu_name[:20]}...\n💡 Recommended: {recommended}"
-        else:
-            recommended = "fast"
-            hardware_info = f"🖥️ CPU Only\n💡 Recommended: {recommended}"
+        # Simple CPU-only hardware info
+        recommended = "fast"
+        hardware_info = "🖥️ CPU Only\n💡 Recommended: Fast"
         
         st.info(f"""
-        **{config['description']}**
-        - Steps: {config['inference_steps']}
-        - Size: {config['image_size']}px
-        - Guidance: {config['guidance_scale']}
-        
-        {hardware_info}
+**{config['description']}**
+- Steps: {config['inference_steps']}
+- Size: {config['image_size']}px
+- Guidance: {config['guidance_scale']}
+
+{hardware_info}
         """)
 
 # Apply the selected preset
@@ -380,55 +377,72 @@ if st.session_state.input_image and st.session_state.processing_started:
             
             print(f"DEBUG: Starting colorization for '{label}'...")
             
-            # Create progress callback for real-time UI updates
+            # Create LIVE progress callback for real-time UI updates
             def colorization_progress_callback(current_step, total_steps, step_progress):
                 # Map colorization progress to overall progress (60% to 90%)
                 base_progress = 60  # Progress after recognition
                 colorization_range = 30  # Range for colorization (60% to 90%)
                 overall_progress = base_progress + (step_progress / 100) * colorization_range
                 
+                # Update progress bar IMMEDIATELY
                 progress_bar.progress(int(overall_progress))
                 
-                # Update status and time estimate
+                # Update status with LIVE step information
                 elapsed = time.time() - start_time
                 step_text = f"Step {current_step + 1}/{total_steps}"  # +1 for user-friendly 1-based counting
                 status_text.markdown(f'<div class="progress-text">🎨 Generating colorized image... {step_text} ({step_progress:.1f}%)</div>', unsafe_allow_html=True)
                 
-                # Calculate ETA for ENTIRE process completion
-                if current_step >= 1:  # Show ETA after completing at least 1 step
+                # Force immediate UI update using placeholder refresh
+                try:
+                    # Update session state for live tracking
+                    st.session_state.current_step = current_step
+                    st.session_state.total_steps = total_steps
+                    st.session_state.step_progress = step_progress
+                    st.session_state.elapsed_time = elapsed
+                    
+                    # Force UI refresh by updating container content
+                    progress_bar.progress(int(overall_progress))
+                    
+                except Exception:
+                    pass  # Continue if UI refresh fails
+                
+                # Calculate LIVE ETA for ENTIRE process completion
+                if current_step >= 0:  # Show ETA immediately (starts from step 0)
                     # Calculate colorization progress
                     completed_steps = current_step + 1  # +1 because step counting starts from 0
                     colorization_progress = completed_steps / total_steps  # 0.0 to 1.0
                     
                     # Overall process stages:
-                    # 1. Setup & Loading: 0% - 10% (already done, took time before this callback)
-                    # 2. Recognition: 10% - 60% (already done, took ~5-15s typically)  
+                    # 1. Setup & Loading: 0% - 10% (already done)
+                    # 2. Recognition: 10% - 60% (already done)  
                     # 3. Colorization: 60% - 90% (current stage)
-                    # 4. Saving & Cleanup: 90% - 100% (will take ~2-5s)
+                    # 4. Saving & Cleanup: 90% - 100% (estimated ~2-5s)
                     
                     current_overall_progress = 0.6 + (colorization_progress * 0.3)  # 60% to 90%
                     
-                    # Estimate total process time based on current overall progress
-                    if current_overall_progress > 0.61:  # After at least some colorization progress
-                        estimated_total_time = elapsed / current_overall_progress
-                        remaining_time = estimated_total_time - elapsed
+                    # LIVE ETA calculation - update every step
+                    if current_step >= 1:  # After at least 1 step completed
+                        # Calculate time per step for more accurate ETA
+                        time_per_step = elapsed / completed_steps
+                        remaining_steps = total_steps - completed_steps
+                        colorization_eta = remaining_steps * time_per_step
                         
-                        # Add buffer time for final saving/cleanup stages (90%-100%)
-                        final_stage_buffer = 5  # Estimated 5 seconds for saving and cleanup
-                        if current_overall_progress < 0.9:  # Still in colorization phase
-                            remaining_time += final_stage_buffer
+                        # Add buffer for final saving/cleanup (90%-100%)
+                        final_stage_buffer = 3  # Estimated 3 seconds for saving
+                        total_remaining_time = colorization_eta + final_stage_buffer
                         
-                        if remaining_time > 3:  # Only show meaningful ETAs
-                            minutes = int(remaining_time // 60)
-                            seconds = int(remaining_time % 60)
+                        if total_remaining_time > 2:  # Show ETA if meaningful
+                            minutes = int(total_remaining_time // 60)
+                            seconds = int(total_remaining_time % 60)
                             if minutes > 0:
-                                time_text.markdown(f"⏱️ *Elapsed: {elapsed:.1f}s | Total ETA: ~{minutes}m {seconds}s*")
+                                time_text.markdown(f"⏱️ *Elapsed: {elapsed:.0f}s | ETA: ~{minutes}m {seconds}s remaining*")
                             else:
-                                time_text.markdown(f"⏱️ *Elapsed: {elapsed:.1f}s | Total ETA: ~{seconds}s*")
+                                time_text.markdown(f"⏱️ *Elapsed: {elapsed:.0f}s | ETA: ~{seconds}s remaining*")
                         else:
-                            time_text.markdown(f"⏱️ *Elapsed: {elapsed:.1f}s | Almost complete!*")
+                            time_text.markdown(f"⏱️ *Elapsed: {elapsed:.0f}s | Almost complete!*")
                     else:
-                        time_text.markdown(f"⏱️ *Elapsed: {elapsed:.1f}s | Calculating...*")
+                        # First step - show basic info
+                        time_text.markdown(f"⏱️ *Elapsed: {elapsed:.0f}s | Calculating ETA...*")
                 else:
                     time_text.markdown(f"⏱️ *Elapsed: {elapsed:.1f}s | Processing...*")
             

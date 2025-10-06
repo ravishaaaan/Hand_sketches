@@ -3,6 +3,12 @@ from transformers import AutoImageProcessor, AutoModelForImageClassification
 from PIL import Image
 import torch
 import os
+import warnings
+
+# Suppress transformers warnings for cleaner output
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+warnings.filterwarnings("ignore", message=".*use_fast.*")
 
 MODEL_NAME = "kmewhort/beit-sketch-classifier"
 
