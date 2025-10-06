@@ -1,0 +1,144 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyTorch
+*.pth
+*.pt
+
+# Hugging Face Cache
+.cache/
+models/
+checkpoints/
+
+# Project Specific
+datasets/*.png
+datasets/*.jpg
+datasets/*.jpeg
+datasets/*.gif
+outputs/*.png
+outputs/*.jpg
+outputs/*.jpeg
+outputs/*.gif
+temp/
+tmp/
+
+# Logs
+*.log
+logs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# AI Model Files (too large for git)
+*.bin
+*.safetensors
+*.ckpt
+
+# Documentation Build
+docs/_build/
+
+# Testing
+.coverage
+.pytest_cache/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Temporary files
+*.tmp
+*.temp
+temp_*
+test_*
+
+# Environment variables
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Configuration files that might contain secrets
+config.json
+secrets.json
+credentials.json
+
+# Large files and datasets
+*.zip
+*.tar.gz
+*.rar
+large_datasets/
+model_cache/
+
+# Generated documentation
+site/
+
+# MacOS
+.AppleDouble
+.LSOverride
+Icon
+
+# Windows
+desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
