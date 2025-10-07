@@ -45,7 +45,7 @@ with col1:
         "Choose Quality Level:",
         options=list(preset_options.keys()),
         index=1,  # Default to "Medium" (index 1)
-        help="Fast ~30s, Medium ~1min, High ~2min, Ultra ~5min"
+        help="Fast ~40s, Medium ~2min, High ~15min, Ultra ~30min"
     )
     
     selected_preset = preset_options[selected_preset_display]
@@ -525,10 +525,10 @@ with st.sidebar:
     
     st.markdown("### ⚡ **Quality Levels:**")
     st.markdown("""
-    - **⚡ Fast (5 steps)**: Quick results (~30s) 
-    - **⚖️ Medium (10 steps)**: Good balance (~1min)
-    - **🎨 High (20 steps)**: Great quality (~2min)  
-    - **💎 Ultra (50 steps)**: Maximum quality (~5min)
+    - **⚡ Fast (5 steps)**: Quick results (~40s) 
+    - **⚖️ Medium (10 steps)**: Good balance (~2min)
+    - **🎨 High (20 steps)**: Great quality (~15min)  
+    - **💎 Ultra (50 steps)**: Maximum quality (~30min)
     """)
     
     st.markdown("### 💡 **Speed Tips:**")
